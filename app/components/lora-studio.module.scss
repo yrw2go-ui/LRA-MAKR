@@ -167,7 +167,7 @@
   gap: 8px;
   align-items: center;
 
-  input {
+  input[type="text"] {
     min-width: 200px;
   }
 }
@@ -319,5 +319,65 @@
     padding: 8px;
     box-sizing: border-box;
     text-align: center;
+  }
+}
+
+@media (max-width: 600px) {
+  .lora-page .lora-body {
+    padding: 14px 12px 40px;
+  }
+
+  .header {
+    padding: 16px 14px 0;
+
+    .tagline {
+      font-size: 13px;
+    }
+  }
+
+  .nav {
+    margin-bottom: 0;
+  }
+
+  .inline {
+    flex-wrap: wrap;
+
+    input[type="text"] {
+      flex: 1;
+      min-width: 0;
+    }
+  }
+
+  .dropzone {
+    padding: 24px 12px;
+  }
+
+  .grid {
+    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  }
+
+  .job {
+    padding: 12px;
+
+    .job-header {
+      flex-direction: column;
+    }
+
+    .job-actions {
+      width: 100%;
+      justify-content: space-between;
+    }
+
+    .try-row {
+      flex-direction: column;
+    }
+
+    .samples {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+
+  .consent {
+    font-size: 13px;
   }
 }

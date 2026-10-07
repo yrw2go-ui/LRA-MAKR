@@ -34,8 +34,13 @@ export type LocalModel = {
   name: string;
   repo: string;
   media: "image" | "video";
+  group?: "image" | "video";
   vram_gb: number;
   gated: boolean;
+  // fetched by ai-toolkit on the first (online) run instead of up front
+  auto_download?: boolean;
+  // image-to-video: previews start from the first training image
+  i2v?: boolean;
   note: string;
   default_rank: number;
   downloaded: boolean | null;
@@ -328,6 +333,28 @@ export const useLoraStore = createPersistStore(
       return images.length;
     }
 
+    // Applies a local trainer job update. Once the job has ended (finished or
+    // stopped), its training samples are copied into the library, since the
+    // trainer's job folder may be cleaned up later.
+    async function applyLocal(id: string, raw: any) {
+      const update = fromLocal(raw);
+      patchJob(id, update);
+      const job = _get().jobs.find((j) => j.id === id);
+      if (
+        !job ||
+        job.librarySaved ||
+        !update.status ||
+        !isLoraDone(update.status) ||
+        !update.localSamples?.length
+      ) {
+        return;
+      }
+      patchJob(id, { librarySaved: true });
+      const urls = update.localSamples.map(methods.localFileUrl);
+      const saved = await saveOutputs(id, urls, "training sample");
+      if (!saved) patchJob(id, { librarySaved: false });
+    }
+
     const methods = {
       // Fetches a finished LoRA, unpacks it if the trainer returned an
       // archive, and stamps name / trigger word / base model into it.
@@ -545,16 +572,7 @@ export const useLoraStore = createPersistStore(
         const job = _get().jobs.find((j) => j.id === id);
         if (job?.localId) {
           try {
-            const update = fromLocal(await local(`jobs/${job.localId}`));
-            patchJob(id, update);
-            // keep the training samples once the job is done, since the
-            // trainer's job folder may be cleaned up later
-            if (update.status === "succeeded" && !job.librarySaved) {
-              patchJob(id, { librarySaved: true });
-              const urls = (update.localSamples ?? []).map(methods.localFileUrl);
-              const saved = await saveOutputs(id, urls, "training sample");
-              if (urls.length && !saved) patchJob(id, { librarySaved: false });
-            }
+            await applyLocal(id, await local(`jobs/${job.localId}`));
           } catch (e: any) {
             console.error("[LoRA] local refresh failed", e);
           }
@@ -582,11 +600,9 @@ export const useLoraStore = createPersistStore(
       async cancelJob(id: string) {
         const job = _get().jobs.find((j) => j.id === id);
         if (job?.localId) {
-          patchJob(
+          await applyLocal(
             id,
-            fromLocal(
-              await local(`jobs/${job.localId}/cancel`, { method: "POST" }),
-            ),
+            await local(`jobs/${job.localId}/cancel`, { method: "POST" }),
           );
           return;
         }

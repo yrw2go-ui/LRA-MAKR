@@ -4,14 +4,24 @@ Train image and video LoRAs in a few clicks, on Replicate's cloud GPUs or on
 your own NVIDIA GPU with [ai-toolkit](https://github.com/ostris/ai-toolkit),
 offline once the base model is downloaded.
 
-- **Base models:** FLUX.1 dev / schnell, SDXL, Qwen-Image, Wan 2.1 (video),
-  HunyuanVideo (cloud), or any trainable Replicate model
+- **Base models (your PC):** FLUX.1 dev / schnell, FLUX.2 dev and klein 4B / 9B,
+  Z-Image and Z-Image Turbo, Qwen-Image (original, 2512, 2.1), Krea 2 and Krea 2
+  Turbo, Chroma, Lumina 2, SDXL, SD 1.5; video: Wan 2.1 1.3B, Wan 2.2 5B and 14B,
+  Wan image-to-video (2.1 480p, 2.2 14B), LTX-2 / 2.3 / 2.5 (video with sound)
+- **Base models (cloud):** FLUX.1 dev, SDXL, Qwen-Image, HunyuanVideo, or any
+  trainable Replicate model
 - **LoRA types:** person / character, object / product, art style, concept
 - **Outputs:** a single `.safetensors` file with the trigger word stored in its
   metadata, plus a one-click ComfyUI export (workflow + LoRA + setup notes)
 - **Library:** every LoRA's training images (with captions) and generated
   images are kept in the browser, with "Download all" and "Retrain with these
   images". It's per-browser storage, so it doesn't sync between devices.
+
+## On a phone
+
+Open the site and use **Add to Home Screen** (Safari share menu, or Chrome's
+menu) to install it as a full-screen app. Cloud training works from the phone;
+training on your own GPU needs the PC.
 
 ## Run the web app
 

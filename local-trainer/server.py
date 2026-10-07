@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -37,16 +38,105 @@ GPU_POLL_SECONDS = 5
 OVERHEAT_READINGS = 2
 DEFAULT_MAX_TEMP = 85
 
-# Base models LRA-MAKR can train locally. "model" and "sample" are merged
-# into the ai-toolkit config; they follow ai-toolkit's config/examples.
+# Base models LRA-MAKR can train locally. "model", "train", "sample" and
+# "dataset" are merged into the ai-toolkit config; values follow ai-toolkit's
+# own per-model defaults (ui/.../diffusion_models/ui.tsx and config/examples).
+#
+# "downloads" lists what "Download for offline use" fetches: a repo id, or
+# {"repo", "allow"/"ignore"} to fetch only part of a repo. An empty list means
+# the model is too big or too varied to pre-fetch sensibly; ai-toolkit then
+# downloads what it needs on the first (online) run. "vram" is a rough guide.
+ARA = "ostris/accuracy_recovery_adapters"
+
+
+def ara(file):
+    return {"repo": ARA, "allow": [file]}
+
+
+FLUX2_KLEIN = {
+    "media": "image",
+    "group": "image",
+    "train": {
+        "noise_scheduler": "flowmatch",
+        "timestep_type": "weighted",
+        "lr": 1e-4,
+        "unload_text_encoder": False,
+    },
+    "sample": {"sampler": "flowmatch", "guidance_scale": 4, "sample_steps": 25},
+    "resolution": [512, 768, 1024],
+    "rank": 16,
+}
+
+KREA2 = {
+    "media": "image",
+    "group": "image",
+    "gated": True,
+    "vram": 24,
+    "train": {"noise_scheduler": "flowmatch", "timestep_type": "linear", "lr": 1e-4},
+    "resolution": [512, 768, 1024],
+    "rank": 16,
+}
+KREA2_SHARED = ["Qwen/Qwen3-VL-4B-Instruct", {"repo": "Qwen/Qwen-Image", "allow": ["vae/*"]}]
+
+WAN22_14B = {
+    "media": "video",
+    "group": "video",
+    "gated": False,
+    "vram": 24,
+    "train": {"noise_scheduler": "flowmatch", "timestep_type": "linear", "lr": 1e-4},
+    "sample": {
+        "sampler": "flowmatch",
+        "guidance_scale": 4,
+        "sample_steps": 30,
+        "width": 832,
+        "height": 480,
+        "num_frames": 41,
+        "fps": 16,
+    },
+    "dataset": {"fps": 16},
+    "video_frames": 33,
+    "resolution": [512],
+    "rank": 32,
+}
+
+LTX2 = {
+    "media": "video",
+    "group": "video",
+    "vram": 32,
+    "downloads": [],
+    "train": {
+        "noise_scheduler": "flowmatch",
+        "timestep_type": "weighted",
+        "lr": 1e-4,
+        "audio_loss_multiplier": 1,
+    },
+    "sample": {
+        "sampler": "flowmatch",
+        "guidance_scale": 4,
+        "sample_steps": 30,
+        "width": 768,
+        "height": 512,
+        "num_frames": 49,
+        "fps": 24,
+    },
+    "dataset": {"fps": 24, "do_i2v": False, "auto_frame_count": False},
+    # LTX learns the clips' sound too
+    "video_dataset": {"do_audio": True},
+    "video_frames": 49,  # LTX needs 8n+1 frames
+    "resolution": [512],
+    "rank": 32,
+}
+
 MODELS = {
+    # ---- image
     "flux-dev": {
         "name": "FLUX.1 [dev]",
+        "group": "image",
         "repo": "black-forest-labs/FLUX.1-dev",
         "media": "image",
         "vram": 24,
         "gated": True,
-        "note": "Best quality. Needs a Hugging Face token with access to FLUX.1-dev for the first download.",
+        "note": "Proven all-rounder. Needs a Hugging Face token with access to FLUX.1-dev for the first download.",
         "model": {"is_flux": True, "quantize": True},
         "train": {"noise_scheduler": "flowmatch", "lr": 1e-4},
         "sample": {"sampler": "flowmatch", "guidance_scale": 4, "sample_steps": 20},
@@ -55,8 +145,12 @@ MODELS = {
     },
     "flux-schnell": {
         "name": "FLUX.1 [schnell]",
+        "group": "image",
         "repo": "black-forest-labs/FLUX.1-schnell",
-        "extra_repos": ["ostris/FLUX.1-schnell-training-adapter"],
+        "downloads": [
+            "black-forest-labs/FLUX.1-schnell",
+            "ostris/FLUX.1-schnell-training-adapter",
+        ],
         "media": "image",
         "vram": 24,
         "gated": False,
@@ -71,23 +165,190 @@ MODELS = {
         "resolution": [512, 768, 1024],
         "rank": 16,
     },
-    "sdxl": {
-        "name": "Stable Diffusion XL",
-        "repo": "stabilityai/stable-diffusion-xl-base-1.0",
-        "media": "image",
+    "flux2-klein-4b": {
+        **FLUX2_KLEIN,
+        "name": "FLUX.2 klein 4B",
+        "repo": "black-forest-labs/FLUX.2-klein-base-4B",
+        "downloads": [
+            "black-forest-labs/FLUX.2-klein-base-4B",
+            "Qwen/Qwen3-4B",
+            "ai-toolkit/flux2_vae",
+        ],
         "vram": 12,
         "gated": False,
-        "note": "Runs on 12GB GPUs. Huge ecosystem of SDXL tools.",
-        "model": {"is_xl": True},
-        "train": {"noise_scheduler": "ddpm", "lr": 1e-4},
-        "sample": {"sampler": "ddpm", "guidance_scale": 7, "sample_steps": 30},
-        "resolution": [1024],
+        "note": "Newest FLUX in a small, fast size. A good pick for 12-16GB GPUs.",
+        "model": {
+            "arch": "flux2_klein_4b",
+            "quantize": True,
+            "quantize_te": True,
+            "qtype": "qfloat8",
+            "low_vram": True,
+            "model_kwargs": {"match_target_res": False},
+        },
+    },
+    "flux2-klein-9b": {
+        **FLUX2_KLEIN,
+        "name": "FLUX.2 klein 9B",
+        "repo": "black-forest-labs/FLUX.2-klein-base-9B",
+        "downloads": [
+            "black-forest-labs/FLUX.2-klein-base-9B",
+            "Qwen/Qwen3-8B",
+            "ai-toolkit/flux2_vae",
+        ],
+        "vram": 20,
+        "gated": True,
+        "note": "Newest FLUX, mid-size: better detail than 4B, still fits a 24GB GPU.",
+        "model": {
+            "arch": "flux2_klein_9b",
+            "quantize": True,
+            "quantize_te": True,
+            "qtype": "qfloat8",
+            "low_vram": True,
+            "model_kwargs": {"match_target_res": False},
+        },
+    },
+    "flux2-dev": {
+        **FLUX2_KLEIN,
+        "name": "FLUX.2 [dev]",
+        "repo": "black-forest-labs/FLUX.2-dev",
+        "downloads": [
+            "black-forest-labs/FLUX.2-dev",
+            {
+                "repo": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+                "allow": ["*.json", "*.txt", "*.model", "tokenizer*"],
+            },
+        ],
+        "vram": 32,
+        "gated": True,
+        "note": "Top FLUX quality, but very large (32B): needs a 32GB+ GPU or lots of system RAM.",
+        "model": {
+            "arch": "flux2",
+            "quantize": True,
+            "quantize_te": True,
+            "qtype": "qfloat8",
+            "low_vram": True,
+            "layer_offloading": True,
+            "model_kwargs": {"match_target_res": False},
+        },
+    },
+    "zimage-turbo": {
+        "name": "Z-Image Turbo",
+        "group": "image",
+        "repo": "Tongyi-MAI/Z-Image-Turbo",
+        "downloads": ["Tongyi-MAI/Z-Image-Turbo", "ostris/zimage_turbo_training_adapter"],
+        "media": "image",
+        "vram": 16,
+        "gated": False,
+        "note": "Fast, sharp 6B model; LoRAs work with its quick 8-9 step generation.",
+        "model": {
+            "arch": "zimage",
+            "quantize": True,
+            "quantize_te": True,
+            "qtype": "qfloat8",
+            "low_vram": True,
+            "assistant_lora_path": "ostris/zimage_turbo_training_adapter/zimage_turbo_training_adapter_v2.safetensors",
+        },
+        "train": {
+            "noise_scheduler": "flowmatch",
+            "timestep_type": "weighted",
+            "lr": 1e-4,
+            "unload_text_encoder": False,
+        },
+        "sample": {"sampler": "flowmatch", "guidance_scale": 1, "sample_steps": 9},
+        "resolution": [512, 768, 1024],
+        "rank": 16,
+    },
+    "zimage": {
+        "name": "Z-Image",
+        "group": "image",
+        "repo": "Tongyi-MAI/Z-Image",
+        "media": "image",
+        "vram": 16,
+        "gated": False,
+        "note": "The full (non-turbo) Z-Image: slower to generate, more flexible.",
+        "model": {
+            "arch": "zimage",
+            "quantize": True,
+            "quantize_te": True,
+            "qtype": "qfloat8",
+            "low_vram": True,
+        },
+        "train": {
+            "noise_scheduler": "flowmatch",
+            "timestep_type": "weighted",
+            "lr": 1e-4,
+            "unload_text_encoder": False,
+        },
+        "sample": {"sampler": "flowmatch", "guidance_scale": 4, "sample_steps": 30},
+        "resolution": [512, 768, 1024],
+        "rank": 16,
+    },
+    "qwen-image-2.1": {
+        "name": "Qwen-Image 2.1",
+        "group": "image",
+        "repo": "Comfy-Org/Qwen-Image-2.1",
+        "downloads": [
+            "Comfy-Org/Qwen-Image-2.1",
+            {"repo": "Qwen/Qwen-Image-2.1", "allow": ["*.json", "*.txt", "tokenizer*/*", "*/*.json"]},
+        ],
+        "media": "image",
+        "vram": 24,
+        "gated": False,
+        "note": "Latest Qwen-Image: strong at illustration, layouts and text in images.",
+        "model": {
+            "arch": "qwen_image_2",
+            "quantize": True,
+            "quantize_te": True,
+            "qtype": "convrot8",
+            "qtype_te": "convrot8",
+            "low_vram": True,
+            "model_kwargs": {"rgba": False},
+        },
+        "train": {
+            "noise_scheduler": "flowmatch",
+            "timestep_type": "shift",
+            "lr": 1e-4,
+            "unload_text_encoder": False,
+        },
+        "sample": {"sampler": "flowmatch", "guidance_scale": 3, "sample_steps": 25},
+        "resolution": [512, 768, 1024],
+        "rank": 16,
+    },
+    "qwen-image-2512": {
+        "name": "Qwen-Image 2512",
+        "group": "image",
+        "repo": "Qwen/Qwen-Image-2512",
+        "downloads": [
+            "Qwen/Qwen-Image-2512",
+            ara("qwen_image_2512_torchao_uint3.safetensors"),
+        ],
+        "media": "image",
+        "vram": 24,
+        "gated": False,
+        "note": "December 2025 Qwen-Image update; uses 3-bit compression to fit 24GB.",
+        "model": {
+            "arch": "qwen_image",
+            "quantize": True,
+            "qtype": f"uint3|{ARA}/qwen_image_2512_torchao_uint3.safetensors",
+            "quantize_te": True,
+            "qtype_te": "qfloat8",
+            "low_vram": True,
+        },
+        "train": {
+            "noise_scheduler": "flowmatch",
+            "timestep_type": "weighted",
+            "lr": 1e-4,
+            "cache_text_embeddings": True,
+        },
+        "sample": {"sampler": "flowmatch", "guidance_scale": 3, "sample_steps": 25},
+        "resolution": [512, 768, 1024],
         "rank": 16,
     },
     "qwen-image": {
         "name": "Qwen-Image",
+        "group": "image",
         "repo": "Qwen/Qwen-Image",
-        "extra_repos": ["ostris/accuracy_recovery_adapters"],
+        "downloads": ["Qwen/Qwen-Image", ara("qwen_image_torchao_uint3.safetensors")],
         "media": "image",
         "vram": 24,
         "gated": False,
@@ -95,7 +356,7 @@ MODELS = {
         "model": {
             "arch": "qwen_image",
             "quantize": True,
-            "qtype": "uint3|ostris/accuracy_recovery_adapters/qwen_image_torchao_uint3.safetensors",
+            "qtype": f"uint3|{ARA}/qwen_image_torchao_uint3.safetensors",
             "quantize_te": True,
             "qtype_te": "qfloat8",
             "low_vram": True,
@@ -109,13 +370,102 @@ MODELS = {
         "resolution": [512, 768, 1024],
         "rank": 16,
     },
+    "krea2": {
+        **KREA2,
+        "name": "Krea 2",
+        "repo": "krea/Krea-2-Raw",
+        "downloads": ["krea/Krea-2-Raw", *KREA2_SHARED],
+        "note": "Photographic, aesthetic look. Gated: accept the license on Hugging Face first.",
+        "model": {"arch": "krea2", "quantize": True, "quantize_te": True, "low_vram": True},
+        "sample": {"sampler": "flowmatch", "guidance_scale": 4, "sample_steps": 25},
+    },
+    "krea2-turbo": {
+        **KREA2,
+        "name": "Krea 2 Turbo",
+        "repo": "krea/Krea-2-Turbo",
+        "downloads": ["krea/Krea-2-Turbo", "ostris/krea2_turbo_training_adapter", *KREA2_SHARED],
+        "note": "Fast version of Krea 2 (about 9 steps). Gated on Hugging Face.",
+        "model": {
+            "arch": "krea2",
+            "quantize": True,
+            "quantize_te": True,
+            "low_vram": True,
+            "assistant_lora_path": "ostris/krea2_turbo_training_adapter/krea2_turbo_training_adapter_v1.safetensors",
+        },
+        "sample": {"sampler": "flowmatch", "guidance_scale": 1, "sample_steps": 9},
+    },
+    "chroma": {
+        "name": "Chroma",
+        "group": "image",
+        "repo": "lodestones/Chroma1-Base",
+        "media": "image",
+        "vram": 16,
+        "gated": False,
+        "note": "Fully open (Apache 2.0) FLUX-style model with a large community.",
+        "model": {"arch": "chroma", "quantize": True, "quantize_te": True},
+        "train": {"noise_scheduler": "flowmatch", "lr": 1e-4},
+        "sample": {"sampler": "flowmatch", "guidance_scale": 4, "sample_steps": 25},
+        "resolution": [512, 768, 1024],
+        "rank": 16,
+    },
+    "sdxl": {
+        "name": "Stable Diffusion XL",
+        "group": "image",
+        "repo": "stabilityai/stable-diffusion-xl-base-1.0",
+        "media": "image",
+        "vram": 12,
+        "gated": False,
+        "note": "Runs on 12GB GPUs. Huge ecosystem of SDXL tools.",
+        "model": {"is_xl": True},
+        "train": {"noise_scheduler": "ddpm", "lr": 1e-4},
+        "sample": {"sampler": "ddpm", "guidance_scale": 7, "sample_steps": 30},
+        "resolution": [1024],
+        "rank": 16,
+    },
+    "lumina2": {
+        "name": "Lumina 2",
+        "group": "image",
+        "repo": "Alpha-VLLM/Lumina-Image-2.0",
+        "media": "image",
+        "vram": 12,
+        "gated": False,
+        "note": "Small (2B) and light on VRAM, with good prompt following.",
+        "model": {"arch": "lumina2", "quantize": False, "quantize_te": True},
+        "train": {"noise_scheduler": "flowmatch", "lr": 1e-4},
+        "sample": {"sampler": "flowmatch", "guidance_scale": 4, "sample_steps": 25},
+        "resolution": [512, 768, 1024],
+        "rank": 16,
+    },
+    "sd15": {
+        "name": "Stable Diffusion 1.5",
+        "group": "image",
+        "repo": "stable-diffusion-v1-5/stable-diffusion-v1-5",
+        "downloads": [
+            {
+                "repo": "stable-diffusion-v1-5/stable-diffusion-v1-5",
+                "ignore": ["*.ckpt", "*.bin", "*ema*", "v1-5-pruned*", "*fp16*", "*.onnx", "*.msgpack", "*.pb", "*.h5"],
+            }
+        ],
+        "media": "image",
+        "vram": 8,
+        "gated": False,
+        "note": "Classic model for modest GPUs (8GB) with a huge ecosystem.",
+        # no arch: ai-toolkit treats that as SD 1.x
+        "model": {},
+        "train": {"noise_scheduler": "ddpm", "lr": 1e-4},
+        "sample": {"sampler": "ddpm", "guidance_scale": 6, "sample_steps": 30, "width": 512, "height": 512},
+        "resolution": [512],
+        "rank": 16,
+    },
+    # ---- video
     "wan21-1b": {
-        "name": "Wan 2.1 1.3B (video)",
+        "name": "Wan 2.1 1.3B",
+        "group": "video",
         "repo": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         "media": "video",
         "vram": 16,
         "gated": False,
-        "note": "Text-to-video LoRA. Train on short clips or images.",
+        "note": "Small text-to-video model. Train on short clips or images.",
         "model": {"arch": "wan21", "quantize_te": True},
         "train": {
             "noise_scheduler": "flowmatch",
@@ -128,11 +478,133 @@ MODELS = {
             "sample_steps": 30,
             "width": 832,
             "height": 480,
-            "num_frames": 40,
-            "fps": 15,
+            "num_frames": 41,
+            "fps": 16,
         },
+        "dataset": {"fps": 16},
+        "video_frames": 33,
         "resolution": [632],
         "rank": 32,
+    },
+    "wan22-5b": {
+        "name": "Wan 2.2 5B (text & image to video)",
+        "group": "video",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "media": "video",
+        "vram": 24,
+        "gated": False,
+        "note": "Text- and image-to-video in one 5B model; the most practical video model on a single 24GB GPU.",
+        "model": {"arch": "wan22_5b", "quantize": True, "quantize_te": True, "low_vram": True},
+        "train": {"noise_scheduler": "flowmatch", "timestep_type": "weighted", "lr": 1e-4},
+        "sample": {
+            "sampler": "flowmatch",
+            "guidance_scale": 4,
+            "sample_steps": 30,
+            "width": 768,
+            "height": 768,
+            "num_frames": 49,
+            "fps": 24,
+        },
+        "dataset": {"fps": 24, "do_i2v": True},
+        "i2v": True,
+        "video_frames": 49,
+        "resolution": [512],
+        "rank": 32,
+    },
+    "wan22-14b": {
+        **WAN22_14B,
+        "name": "Wan 2.2 14B",
+        "repo": "ai-toolkit/Wan2.2-T2V-A14B-Diffusers-bf16",
+        "downloads": [
+            "ai-toolkit/Wan2.2-T2V-A14B-Diffusers-bf16",
+            "ai-toolkit/wan2.1-vae",
+            ara("wan22_14b_t2i_torchao_uint4.safetensors"),
+        ],
+        "note": "Top open text-to-video quality; uses 4-bit compression to fit 24GB.",
+        "model": {
+            "arch": "wan22_14b",
+            "quantize": True,
+            "qtype": f"uint4|{ARA}/wan22_14b_t2i_torchao_uint4.safetensors",
+            "quantize_te": True,
+            "low_vram": True,
+            "model_kwargs": {"train_high_noise": True, "train_low_noise": True},
+        },
+    },
+    "wan22-14b-i2v": {
+        **WAN22_14B,
+        "name": "Wan 2.2 14B image-to-video",
+        "repo": "ai-toolkit/Wan2.2-I2V-A14B-Diffusers-bf16",
+        "downloads": [
+            "ai-toolkit/Wan2.2-I2V-A14B-Diffusers-bf16",
+            "ai-toolkit/wan2.1-vae",
+            ara("wan22_14b_i2v_torchao_uint4.safetensors"),
+        ],
+        "note": "Animates a starting image. Best trained on short clips.",
+        "model": {
+            "arch": "wan22_14b_i2v",
+            "quantize": True,
+            "qtype": f"uint4|{ARA}/wan22_14b_i2v_torchao_uint4.safetensors",
+            "quantize_te": True,
+            "low_vram": True,
+            "model_kwargs": {"train_high_noise": True, "train_low_noise": True},
+        },
+        "i2v": True,
+    },
+    "wan21-i2v-480p": {
+        "name": "Wan 2.1 14B image-to-video (480p)",
+        "group": "video",
+        "repo": "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers",
+        "media": "video",
+        "vram": 32,
+        "gated": False,
+        "note": "Older image-to-video model; heavier than Wan 2.2 5B.",
+        "model": {"arch": "wan21_i2v", "quantize": True, "quantize_te": True},
+        "train": {"noise_scheduler": "flowmatch", "timestep_type": "weighted", "lr": 1e-4},
+        "sample": {
+            "sampler": "flowmatch",
+            "guidance_scale": 5,
+            "sample_steps": 30,
+            "width": 832,
+            "height": 480,
+            "num_frames": 41,
+            "fps": 16,
+        },
+        "dataset": {"fps": 16},
+        "i2v": True,
+        "video_frames": 33,
+        "resolution": [512],
+        "rank": 32,
+    },
+    "ltx2.5": {
+        **LTX2,
+        "name": "LTX-2.5 (video with sound)",
+        "repo": "Lightricks/LTX-2.5",
+        "gated": True,
+        "note": "Newest LTX: video and its audio in one model. Very large (32GB+); downloads on first run.",
+        "model": {
+            "arch": "ltx2.5",
+            "quantize": True,
+            "qtype": "convrot8",
+            "quantize_te": True,
+            "qtype_te": "convrot8",
+            "low_vram": True,
+        },
+    },
+    "ltx2.3": {
+        **LTX2,
+        "name": "LTX-2.3 (video with sound)",
+        "repo": "Lightricks/LTX-2.3/ltx-2.3-22b-dev.safetensors",
+        "gated": False,
+        "note": "Video plus audio (22B). Very large (32GB+); downloads on first run.",
+        "model": {"arch": "ltx2.3", "quantize": True, "quantize_te": True, "low_vram": True},
+    },
+    "ltx2": {
+        **LTX2,
+        "name": "LTX-2 (video with sound)",
+        "repo": "Lightricks/LTX-2",
+        "gated": False,
+        "note": "First LTX-2 release; video plus audio. Very large; downloads on first run.",
+        "model": {"arch": "ltx2", "quantize": True, "quantize_te": True, "low_vram": True},
     },
 }
 
@@ -179,6 +651,14 @@ def parse_max_temp(value):
     except (TypeError, ValueError):
         return None
     return temp if 50 <= temp <= 100 else None
+
+
+def online(timeout=3):
+    try:
+        socket.create_connection(("huggingface.co", 443), timeout=timeout).close()
+        return True
+    except OSError:
+        return False
 
 
 def slugify(text):
@@ -371,6 +851,7 @@ class Store:
 
         media = 0
         has_video = False
+        has_image = False
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             for info in zf.infolist():
                 name = Path(info.filename).name  # flatten, drops any "../"
@@ -383,9 +864,15 @@ class Store:
                 if ext in IMAGE_EXTS | VIDEO_EXTS:
                     media += 1
                     has_video = has_video or ext in VIDEO_EXTS
+                    has_image = has_image or ext in IMAGE_EXTS
 
         if media == 0:
             raise ValueError("dataset contains no images or videos")
+        if has_video and has_image:
+            # ai-toolkit reads either clips or stills from a dataset, not both
+            raise ValueError(
+                "Use either video clips or images for one training, not both"
+            )
 
         # files without a caption get the LoRA type's default caption
         for f in dataset.iterdir():
@@ -413,8 +900,10 @@ class Store:
             "cache_latents_to_disk": True,
             "resolution": preset["resolution"],
         }
+        dataset.update(preset.get("dataset", {}))
         if job.get("has_video"):
-            dataset["num_frames"] = 33
+            dataset["num_frames"] = preset.get("video_frames", 33)
+            dataset.update(preset.get("video_dataset", {}))
         prompts = job["sample_prompts"] or [job["default_caption"]]
         sample = {
             "sample_every": max(50, job["steps"] // 4),
@@ -427,6 +916,21 @@ class Store:
             "walk_seed": True,
             **preset["sample"],
         }
+        disable_sampling = False
+        if preset.get("i2v"):
+            # image-to-video previews need a starting image; use the first
+            # training image, or skip previews for clip-only datasets
+            stills = sorted(
+                p for p in (self.job_dir(job["id"]) / "dataset").iterdir()
+                if p.suffix.lower() in IMAGE_EXTS
+            )
+            if stills:
+                del sample["prompts"]
+                sample["samples"] = [
+                    {"prompt": prompt, "ctrl_img": str(stills[0])} for prompt in prompts
+                ]
+            else:
+                disable_sampling = True
         config = {
             "job": "extension",
             "config": {
@@ -460,6 +964,7 @@ class Store:
                             "dtype": "bf16",
                             **preset["train"],
                             "lr": job["lr"],
+                            **({"disable_sampling": True} if disable_sampling else {}),
                         },
                         "model": {"name_or_path": preset["repo"], **preset["model"]},
                         "sample": sample,
@@ -529,8 +1034,9 @@ class Store:
         log_path = self.job_dir(job_id) / "train.log"
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
-        # if the base model is already downloaded, never touch the network
-        if self.cached.get(job["model"]):
+        # with no internet, tell Hugging Face to use the local cache only, so
+        # loading doesn't hang on network retries
+        if not online():
             env["HF_HUB_OFFLINE"] = "1"
         # tqdm lines look like "name:  12%|###   | 250/2000 [01:02<...]"; other
         # bars (latent caching etc.) are told apart by their total
@@ -593,6 +1099,8 @@ class Store:
                 if code == 0 and self.weights_file(job):
                     job["status"] = "succeeded"
                     job["step"] = job["steps"]
+                    # a finished run has cached everything the model needs
+                    self.mark_ready(job["model"])
                 else:
                     job["status"] = "failed"
                     job["error"] = self.guess_error("\n".join(tail)) or f"ai-toolkit exited with code {code}"
@@ -654,35 +1162,64 @@ class Store:
             cwd=str(self.toolkit),
         )
 
-    def repos(self, model_id):
+    def downloads_for(self, model_id):
+        """Normalized download list: [{"repo", "allow", "ignore"}]."""
         preset = MODELS[model_id]
-        return [preset["repo"], *preset.get("extra_repos", [])]
+        items = preset.get("downloads", [preset["repo"]])
+        return [
+            {"repo": i, "allow": None, "ignore": None}
+            if isinstance(i, str)
+            else {"repo": i["repo"], "allow": i.get("allow"), "ignore": i.get("ignore")}
+            for i in items
+        ]
+
+    def snapshot_code(self, model_id, local_only):
+        return (
+            "from huggingface_hub import snapshot_download\n"
+            f"for d in {self.downloads_for(model_id)!r}:\n"
+            "    print('downloading', d['repo'], flush=True)\n"
+            "    snapshot_download(d['repo'], allow_patterns=d['allow'],\n"
+            f"        ignore_patterns=d['ignore'], local_files_only={local_only})\n"
+        )
+
+    def ready_file(self):
+        return self.home / "ready_models.json"
+
+    def load_ready(self):
+        try:
+            return set(json.loads(self.ready_file().read_text()))
+        except Exception:
+            return set()
+
+    def mark_ready(self, model_id):
+        ready = self.load_ready() | {model_id}
+        self.ready_file().write_text(json.dumps(sorted(ready)))
+        self.cached[model_id] = True
 
     def refresh_cache(self):
+        ready = self.load_ready()
         for model_id in MODELS:
-            code = (
-                "from huggingface_hub import snapshot_download\n"
-                f"for r in {self.repos(model_id)!r}:\n"
-                "    snapshot_download(r, local_files_only=True)\n"
-            )
+            if model_id in ready:
+                self.cached[model_id] = True
+                continue
+            if not MODELS[model_id].get("downloads", True):
+                self.cached[model_id] = False  # only a finished run proves it
+                continue
             try:
-                self.cached[model_id] = self.hf(code, timeout=120).returncode == 0
+                res = self.hf(self.snapshot_code(model_id, True), timeout=120)
+                self.cached[model_id] = res.returncode == 0
             except Exception:
                 self.cached[model_id] = False
 
     def download(self, model_id):
+        if not MODELS[model_id].get("downloads", True):
+            raise ValueError("This model downloads automatically on its first training")
         if self.downloads.get(model_id, {}).get("status") == "downloading":
             return
         self.downloads[model_id] = {"status": "downloading", "log": ""}
 
         def go():
-            code = (
-                "from huggingface_hub import snapshot_download\n"
-                f"for r in {self.repos(model_id)!r}:\n"
-                "    print('downloading', r, flush=True)\n"
-                "    snapshot_download(r)\n"
-            )
-            res = self.hf(code)
+            res = self.hf(self.snapshot_code(model_id, False))
             ok = res.returncode == 0
             self.cached[model_id] = ok
             log = (res.stdout + res.stderr)[-2000:]
@@ -701,7 +1238,11 @@ class Store:
                 "name": p["name"],
                 "repo": p["repo"],
                 "media": p["media"],
+                "group": p.get("group", p["media"]),
                 "vram_gb": p["vram"],
+                # no pre-download: ai-toolkit fetches it on the first run
+                "auto_download": not p.get("downloads", True),
+                "i2v": bool(p.get("i2v")),
                 "gated": p["gated"],
                 "note": p["note"],
                 "default_rank": p["rank"],

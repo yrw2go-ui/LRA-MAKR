@@ -6,7 +6,9 @@ has been downloaded once, training works with no internet connection.
 
 ## Requirements
 
-- NVIDIA GPU: 12GB+ VRAM for SDXL, 16GB+ for Wan 2.1 1.3B, 24GB for FLUX and Qwen-Image
+- NVIDIA GPU. Rough VRAM guide: 8GB SD 1.5; 12GB SDXL, Lumina 2, FLUX.2 klein
+  4B; 16GB Z-Image, Chroma, Wan 2.1 1.3B; 24GB FLUX.1, FLUX.2 klein 9B,
+  Qwen-Image, Krea 2, Wan 2.2; 32GB+ FLUX.2 dev, LTX-2.x, Wan 2.1 14B I2V
 - Linux or Windows, recent NVIDIA drivers
 - Python 3.10+ (3.12 recommended) and git
 
@@ -36,6 +38,11 @@ start.bat         # Windows
 The trainer listens on `http://127.0.0.1:8676`. Open LRA-MAKR, choose
 **This PC**, and press **Download** next to a base model while you're online.
 Once it shows as downloaded, training uses only the local copy.
+
+LTX models are too large to pre-download; they download on the first training
+(online) and are marked ready for offline use once a run finishes. When there's
+no internet connection, the trainer automatically runs ai-toolkit in
+Hugging Face offline mode using what's already downloaded.
 
 Jobs, datasets, configs, logs and `.safetensors` outputs are stored in
 `~/.lora-studio/jobs/<id>/` (change with `--home`).

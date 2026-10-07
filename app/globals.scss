@@ -90,3 +90,25 @@ code {
   border-left: var(--border-in-light);
   border-right: var(--border-in-light);
 }
+
+@media (max-width: 600px) {
+  .app {
+    border: none;
+  }
+
+  // 16px+ text stops iOS Safari zooming in when a field is tapped
+  input[type="text"],
+  input[type="number"],
+  input[type="password"],
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}
+
+// room for the iPhone notch / home bar when opened from the home screen
+body {
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: env(safe-area-inset-bottom);
+}

@@ -575,11 +575,20 @@ function LocalSetup(props: {
             value={modelId}
             onChange={(e) => props.onModel(e.currentTarget.value)}
           >
-            {models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-                {m.downloaded ? " ✓" : ""}
-              </option>
+            {(["image", "video"] as const).map((group) => (
+              <optgroup
+                key={group}
+                label={group === "image" ? "Image models" : "Video models"}
+              >
+                {models
+                  .filter((m) => (m.group ?? m.media) === group)
+                  .map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name} · ~{m.vram_gb}GB
+                      {m.downloaded ? " ✓" : ""}
+                    </option>
+                  ))}
+              </optgroup>
             ))}
           </Select>
         </ListItem>
@@ -594,7 +603,13 @@ function LocalSetup(props: {
               ? model.download.error || "Download failed"
               : model.downloaded
                 ? "Downloaded. Training works without internet."
-                : model.download?.status === "downloading"
+                : model.auto_download
+                  ? `Too large to pre-download: it downloads automatically the first time you train (needs internet), then works offline.${
+                      model.gated
+                        ? " Gated: accept the license on Hugging Face and run huggingface-cli login first."
+                        : ""
+                    }`
+                  : model.download?.status === "downloading"
                   ? `Downloading ${model.repo}… this can take a while`
                   : `Download ${model.repo} once while online${
                       model.gated
@@ -605,6 +620,8 @@ function LocalSetup(props: {
         >
           {model.downloaded ? (
             <span style={{ color: "green" }}>Ready offline</span>
+          ) : model.auto_download ? (
+            <span>On first run</span>
           ) : model.download?.status === "downloading" ? (
             <LoadingIcon />
           ) : (
@@ -811,6 +828,9 @@ export function LoraStudio() {
     !/^[A-Za-z0-9_ ]{2,}$/.test(triggerWord) &&
       "Trigger word: letters, digits, spaces or _ only",
     items.length < MIN_IMAGES && `Add at least ${MIN_IMAGES} files`,
+    items.some((i) => i.kind === "video") &&
+      items.some((i) => i.kind === "image") &&
+      "Use either video clips or images, not both",
     !consent && "Confirm the image rights checkbox",
   ].filter(Boolean) as string[];
 
@@ -1201,7 +1221,12 @@ export function LoraStudio() {
           <div className={styles["tips"]}>
             {loraType.tips} Images are resized to {MAX_SIDE}px in your browser
             before upload
-            {acceptsVideo && "; keep video clips short (a few seconds each)"}.
+            {acceptsVideo &&
+              "; keep video clips short (a few seconds each), and use either clips or images, not both"}
+            .
+            {isLocal &&
+              localModel?.i2v &&
+              " Image-to-video: training previews start from your first image."}
             {isLocal &&
               ` Files without a caption are captioned "${loraType.caption(
                 triggerWord.trim() || "TOK",
