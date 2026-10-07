@@ -28,7 +28,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-VERSION = "1.0"
+VERSION = "1.1"
+
+# Web pages allowed to use the trainer without --allow-origin: the hosted
+# LRA-MAKR app and its Vercel previews. Preview hosts end in the Vercel team's
+# slug, which only that team can deploy under.
+DEFAULT_ORIGINS = {"https://lora-makr.vercel.app"}
+DEFAULT_ORIGIN_PATTERNS = [re.compile(r"^https://lora-makr-[a-z0-9-]+-sap-project\.vercel\.app$")]
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv"}
 MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024
@@ -1262,8 +1268,13 @@ def make_handler(store: Store, allowed_origins):
             return True  # same-origin or non-browser client
         if origin in allowed_origins or "*" in allowed_origins:
             return True
+        if origin in DEFAULT_ORIGINS or any(p.match(origin) for p in DEFAULT_ORIGIN_PATTERNS):
+            return True
         host = urlparse(origin).hostname or ""
         return host in ("localhost", "127.0.0.1", "tauri.localhost", "::1")
+
+    def is_health(path):
+        return urlparse(path).path.strip("/") == "health"
 
     class Handler(BaseHTTPRequestHandler):
         server_version = f"LRAMakrLocal/{VERSION}"
@@ -1273,7 +1284,9 @@ def make_handler(store: Store, allowed_origins):
 
         def cors(self):
             origin = self.headers.get("Origin")
-            if origin and origin_allowed(origin):
+            # /health also answers sites that aren't allowed (with no job or
+            # GPU details), so the app can say why it can't connect
+            if origin and (origin_allowed(origin) or is_health(self.path)):
                 self.send_header("Access-Control-Allow-Origin", origin)
                 self.send_header("Vary", "Origin")
                 self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
@@ -1290,10 +1303,19 @@ def make_handler(store: Store, allowed_origins):
             self.wfile.write(data)
 
         def guard(self):
-            if not origin_allowed(self.headers.get("Origin")):
+            origin = self.headers.get("Origin")
+            if origin_allowed(origin):
+                return True
+            if is_health(self.path):
+                self.reply(200, {
+                    "ok": False,
+                    "error": "origin_not_allowed",
+                    "origin": origin,
+                    "version": VERSION,
+                })
+            else:
                 self.reply(403, {"error": "origin not allowed; start the trainer with --allow-origin"})
-                return False
-            return True
+            return False
 
         def body(self):
             length = int(self.headers.get("Content-Length") or 0)

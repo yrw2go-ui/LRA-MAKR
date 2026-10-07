@@ -24,8 +24,10 @@ import {
   LORA_TYPES,
   DEFAULT_MAX_GPU_TEMP,
   GpuStats,
+  LOCAL_TRAINER_VERSION,
   LocalHealth,
   LocalModel,
+  LocalProbe,
   LoraJob,
   SchemaField,
   TrainerSchema,
@@ -479,21 +481,171 @@ function JobCard(props: { job: LoraJob; gpu?: GpuStats | null }) {
   );
 }
 
+function CopyLine(props: { text: string }) {
+  return (
+    <div className={styles["copy-line"]}>
+      <code>{props.text}</code>
+      <IconButton
+        text="Copy"
+        bordered
+        onClick={() =>
+          navigator.clipboard
+            .writeText(props.text)
+            .then(() => showToast("Copied"))
+            .catch(() => showToast("Couldn't copy; select the text instead"))
+        }
+      />
+    </div>
+  );
+}
+
+// shown while the app can't use the local trainer: why, and how to fix it
+function TrainerHelp(props: { probe: LocalProbe | null }) {
+  const { probe } = props;
+  const ua = typeof navigator === "undefined" ? "" : navigator.userAgent;
+  const isPhone = /iPhone|iPad|Android/i.test(ua);
+  const isSafari = /Safari/i.test(ua) && !/Chrome|Chromium|Edg|CriOS|Android/i.test(ua);
+  const [os, setOs] = useState<"windows" | "linux">(
+    /Linux/i.test(ua) && !/Android/i.test(ua) ? "linux" : "windows",
+  );
+  const repo = "https://github.com/yrw2go-ui/LRA-MAKR.git";
+
+  return (
+    <div className={styles["help"]}>
+      {probe?.state === "blocked" ? (
+        <>
+          <b>The trainer is running, but it isn&apos;t allowing this site.</b>
+          <p>
+            Stop it (close its window), then start it again allowing{" "}
+            <code>{probe.origin}</code>:
+          </p>
+          <CopyLine
+            text={`${os === "windows" ? "start.bat" : "./start.sh"} --allow-origin ${probe.origin}`}
+          />
+          <p className={styles["help-note"]}>
+            Updating the trainer (re-run the installer or setup) makes the
+            hosted LRA-MAKR site work without this.
+          </p>
+        </>
+      ) : isPhone ? (
+        <>
+          <b>Training on your own GPU needs a PC.</b>
+          <p>
+            The local trainer runs on a Windows or Linux PC with an NVIDIA
+            graphics card, so it can&apos;t run on a phone. Switch to{" "}
+            <b>Cloud</b> above, or open LRA-MAKR on your PC.
+          </p>
+        </>
+      ) : (
+        <>
+          <b>
+            {probe ? "Can't find the trainer on this PC." : "Looking for the trainer…"}
+          </b>
+          <p>
+            It&apos;s a separate program that has to be installed once and
+            running while you train. If you&apos;ve installed it, start{" "}
+            <b>LRA-MAKR Trainer</b> from your Desktop or Start menu, then click
+            Retry.
+          </p>
+          {isSafari && (
+            <p className={styles["help-warn"]}>
+              Safari blocks websites from talking to programs on your PC. Use
+              Chrome or Edge for local training.
+            </p>
+          )}
+          <p className={styles["help-note"]}>
+            If your browser asked to let this site access devices on your local
+            network, choose Allow.
+          </p>
+        </>
+      )}
+
+      {!isPhone && probe?.state !== "blocked" && (
+        <>
+          <div className={styles["help-tabs"]}>
+            <button
+              className={os === "windows" ? styles["active"] : ""}
+              onClick={() => setOs("windows")}
+            >
+              Windows
+            </button>
+            <button
+              className={os === "linux" ? styles["active"] : ""}
+              onClick={() => setOs("linux")}
+            >
+              Linux
+            </button>
+          </div>
+          {os === "windows" ? (
+            <ol>
+              <li>
+                <a
+                  className={styles["download-link"]}
+                  href="/install/LRA-MAKR-Setup.bat"
+                  download
+                >
+                  <DownloadIcon />
+                  Download the installer
+                </a>
+              </li>
+              <li>
+                Double-click <code>LRA-MAKR-Setup.bat</code>. If Windows warns
+                about an unrecognized app, choose <i>More info → Run anyway</i>.
+              </li>
+              <li>
+                It installs Python and Git if needed, then the trainer and its
+                AI libraries (10-30 minutes, several GB). It adds{" "}
+                <b>LRA-MAKR Trainer</b> to your Desktop and Start menu and
+                starts it.
+              </li>
+              <li>Come back here and click Retry.</li>
+            </ol>
+          ) : (
+            <ol>
+              <li>
+                Install Python 3.10-3.12 and git, then run:
+                <CopyLine
+                  text={`git clone ${repo} && cd LRA-MAKR/local-trainer && ./setup.sh`}
+                />
+              </li>
+              <li>
+                Start it whenever you want to train (keep the terminal open):
+                <CopyLine text="./start.sh" />
+              </li>
+              <li>Click Retry.</li>
+            </ol>
+          )}
+          <p className={styles["help-note"]}>
+            Needs an NVIDIA graphics card (8GB+ VRAM; 24GB for the larger
+            models) and 20-100GB of free disk space. Macs aren&apos;t supported.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
 function LocalSetup(props: {
   health: LocalHealth | null;
-  error: string;
+  probe: LocalProbe | null;
   models: LocalModel[];
   modelId: string;
   onModel: (id: string) => void;
   onRetry: () => void;
 }) {
   const store = useLoraStore();
-  const { health, error, models, modelId } = props;
+  const { health, probe, models, modelId } = props;
+  const outdated =
+    !!health &&
+    health.version.localeCompare(LOCAL_TRAINER_VERSION, undefined, {
+      numeric: true,
+    }) < 0;
   const model = models.find((m) => m.id === modelId);
   const gpu = health?.gpus[0];
   const live = health?.gpu;
 
   return (
+    <>
     <List>
       <ListItem
         title="Local trainer"
@@ -503,9 +655,12 @@ function LocalSetup(props: {
                 live ? ` · ${gpuSummary(live)}` : ""
               }${
                 health.toolkit_found ? "" : " · ai-toolkit not installed"
-              }`
-            : error ||
-              "Run local-trainer/setup then local-trainer/start on this PC"
+              }${outdated ? " · an update is available: re-run the installer" : ""}`
+            : probe?.state === "blocked"
+              ? "Running, but not allowing this site"
+              : probe
+                ? "Not found on this PC"
+                : "Checking…"
         }
       >
         <div className={styles["inline"]}>
@@ -642,6 +797,8 @@ function LocalSetup(props: {
         <></>
       )}
     </List>
+    {!health && <TrainerHelp probe={probe} />}
+    </>
   );
 }
 
@@ -669,7 +826,7 @@ export function LoraStudio() {
 
   const isLocal = store.backend === "local";
   const [health, setHealth] = useState<LocalHealth | null>(null);
-  const [healthError, setHealthError] = useState("");
+  const [probe, setProbe] = useState<LocalProbe | null>(null);
   const [localModels, setLocalModels] = useState<LocalModel[]>([]);
   const [localModelId, setLocalModelId] = useState("");
   const [rank, setRank] = useState(16);
@@ -686,17 +843,20 @@ export function LoraStudio() {
 
   // talk to the local trainer while "This PC" is selected
   function refreshLocal() {
-    Promise.all([store.localHealth(), store.localModels()])
-      .then(([h, models]) => {
-        setHealth(h);
-        setHealthError("");
+    store
+      .probeLocal()
+      .then(async (result) => {
+        setProbe(result);
+        if (result.state !== "connected") {
+          setHealth(null);
+          return;
+        }
+        setHealth(result.health);
+        const models = await store.localModels();
         setLocalModels(models);
         setLocalModelId((id) => id || models[0]?.id || "");
       })
-      .catch((e) => {
-        setHealth(null);
-        setHealthError(e.message);
-      });
+      .catch(() => setHealth(null));
   }
   useEffect(() => {
     if (!isLocal) return;
@@ -997,7 +1157,7 @@ export function LoraStudio() {
           {isLocal ? (
             <LocalSetup
               health={health}
-              error={healthError}
+              probe={probe}
               models={localModels}
               modelId={localModelId}
               onModel={setLocalModelId}

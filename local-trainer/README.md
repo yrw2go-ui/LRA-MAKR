@@ -14,6 +14,17 @@ has been downloaded once, training works with no internet connection.
 
 ## Install
 
+**Windows, one click:** in LRA-MAKR choose *Train on: This PC* and click
+**Download the installer** (or grab `public/install/LRA-MAKR-Setup.bat` from
+this repo), then double-click it. It installs Python 3.12 and Git with winget
+if they're missing, puts the trainer in `%LOCALAPPDATA%\LRA-MAKR`, installs
+ai-toolkit, optionally signs you in to Hugging Face, adds an **LRA-MAKR
+Trainer** shortcut to the Desktop and Start menu, and starts it. Running it
+again updates the trainer. Set `LRA_BRANCH` to install a branch other than
+`main`.
+
+**By hand:**
+
 ```bash
 # Linux
 ./setup.sh
@@ -59,11 +70,13 @@ Jobs, datasets, configs, logs and `.safetensors` outputs are stored in
 - After a stop, the last checkpoint ai-toolkit saved (every quarter of the
   run) is still downloadable as a partial LoRA.
 
-## Using it from a hosted copy of the app
+## Which websites can use it
 
-Only pages served from `localhost` or the desktop app may talk to the trainer,
-so other websites can't start jobs on your GPU. To use a hosted copy, allow its
-origin explicitly:
+Only the hosted app (`https://lora-makr.vercel.app` and its Vercel previews)
+and pages served from `localhost` may talk to the trainer, so other websites
+can't start jobs on your GPU. Any other site gets only a "not allowed" answer
+from `/health` (no job or GPU details), which the app uses to explain the
+problem. To use another copy of the app, allow its origin explicitly:
 
 ```bash
 ./start.sh --allow-origin https://your-app.example.com

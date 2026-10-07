@@ -67,6 +67,17 @@ export type GpuStats = {
 
 export const DEFAULT_MAX_GPU_TEMP = 85;
 
+// trainer version that understands everything this app sends
+export const LOCAL_TRAINER_VERSION = "1.1";
+
+// why the app can or can't talk to the local trainer
+export type LocalProbe =
+  | { state: "connected"; health: LocalHealth }
+  // running, but started without allowing this site
+  | { state: "blocked"; origin: string }
+  // not installed, not running, or the browser refused the connection
+  | { state: "unreachable" };
+
 export type LoraSample = {
   id: string;
   prompt: string;
@@ -409,6 +420,22 @@ export const useLoraStore = createPersistStore(
 
       localHealth(): Promise<LocalHealth> {
         return local("health");
+      },
+
+      async probeLocal(): Promise<LocalProbe> {
+        const base = _get().localUrl.replace(/\/+$/, "");
+        let data: any;
+        try {
+          const res = await fetch(`${base}/health`);
+          data = await res.json();
+        } catch {
+          return { state: "unreachable" };
+        }
+        if (data?.ok) return { state: "connected", health: data };
+        if (data?.error === "origin_not_allowed") {
+          return { state: "blocked", origin: data.origin ?? location.origin };
+        }
+        return { state: "unreachable" };
       },
 
       async localModels(): Promise<LocalModel[]> {
