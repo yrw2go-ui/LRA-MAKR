@@ -22,6 +22,8 @@ import {
   BASE_MODELS,
   LORA_PRESETS,
   LORA_TYPES,
+  DEFAULT_MAX_GPU_TEMP,
+  GpuStats,
   LocalHealth,
   LocalModel,
   LoraJob,
@@ -221,8 +223,38 @@ async function exportComfy(job: LoraJob, safetensors: Blob) {
   downloadBlob(createZip(entries), `${slug}_comfyui.zip`);
 }
 
-function JobCard(props: { job: LoraJob }) {
-  const { job } = props;
+function gpuSummary(gpu: GpuStats) {
+  return [
+    gpu.temp_c != null && `${Math.round(gpu.temp_c)}°C`,
+    gpu.util_pct != null && `${Math.round(gpu.util_pct)}% busy`,
+    gpu.power_w != null && `${Math.round(gpu.power_w)} W`,
+    gpu.mem_used_gb != null &&
+      gpu.mem_total_gb != null &&
+      `${gpu.mem_used_gb}/${gpu.mem_total_gb} GB VRAM`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function tempColor(temp: number | null, limit: number) {
+  if (temp == null) return undefined;
+  const warnAt = (limit || DEFAULT_MAX_GPU_TEMP) - 5;
+  if (temp >= warnAt + 5) return "red";
+  if (temp >= warnAt) return "orange";
+  return undefined;
+}
+
+// the latest checkpoint of a stopped/failed local run can still be used
+function canDownload(job: LoraJob) {
+  return (
+    !!job.weights &&
+    (job.status === "succeeded" ||
+      (job.backend === "local" && job.partialStep !== undefined))
+  );
+}
+
+function JobCard(props: { job: LoraJob; gpu?: GpuStats | null }) {
+  const { job, gpu } = props;
   const store = useLoraStore();
   const [prompt, setPrompt] = useState(`a photo of ${job.triggerWord}`);
   const [showLogs, setShowLogs] = useState(false);
@@ -269,11 +301,17 @@ function JobCard(props: { job: LoraJob }) {
           </span>
           {running && (job.trainingId || job.localId) && (
             <IconButton
-              text="Cancel"
+              text="Stop training"
+              type="danger"
               bordered
-              onClick={() =>
-                store.cancelJob(job.id).catch((e) => showToast(e.message))
-              }
+              onClick={() => {
+                const note = isLocal
+                  ? " Your GPU is released right away; the last saved checkpoint stays downloadable."
+                  : "";
+                if (confirm(`Stop training "${job.name}"?${note}`)) {
+                  store.cancelJob(job.id).catch((e) => showToast(e.message));
+                }
+              }}
             />
           )}
           {!running && (
@@ -302,6 +340,17 @@ function JobCard(props: { job: LoraJob }) {
               width: `${Math.round(((job.step ?? 0) / job.steps) * 100)}%`,
             }}
           />
+        </div>
+      )}
+      {isLocal && job.status === "processing" && gpu && (
+        <div
+          className={styles["gpu"]}
+          style={{ color: tempColor(gpu.temp_c, store.maxGpuTemp) }}
+        >
+          GPU: {gpuSummary(gpu)}
+          {store.maxGpuTemp
+            ? ` · auto-stop at ${store.maxGpuTemp}°C`
+            : " · overheat protection off"}
         </div>
       )}
 
@@ -340,8 +389,15 @@ function JobCard(props: { job: LoraJob }) {
         </div>
       )}
 
-      {job.status === "succeeded" && (
+      {canDownload(job) && (
         <>
+          {job.status !== "succeeded" && (
+            <div className={styles["job-meta"]}>
+              Partial LoRA from the last checkpoint
+              {job.partialStep ? ` (step ${job.partialStep} of ${job.steps})` : ""}
+              . Usable, but less trained than a finished run.
+            </div>
+          )}
           <div className={styles["job-links"]}>
             {job.weights && (
               <IconButton
@@ -435,6 +491,7 @@ function LocalSetup(props: {
   const { health, error, models, modelId } = props;
   const model = models.find((m) => m.id === modelId);
   const gpu = health?.gpus[0];
+  const live = health?.gpu;
 
   return (
     <List>
@@ -443,6 +500,8 @@ function LocalSetup(props: {
         subTitle={
           health
             ? `Connected · ${gpu ? `${gpu.name} (${gpu.vram_gb}GB)` : "no NVIDIA GPU detected"}${
+                live ? ` · ${gpuSummary(live)}` : ""
+              }${
                 health.toolkit_found ? "" : " · ai-toolkit not installed"
               }`
             : error ||
@@ -458,6 +517,47 @@ function LocalSetup(props: {
           <IconButton text="Retry" bordered onClick={props.onRetry} />
         </div>
       </ListItem>
+      {health && gpu ? (
+        <ListItem
+          title="Overheat protection"
+          subTitle={
+            store.maxGpuTemp
+              ? `Training stops by itself if the GPU stays at ${store.maxGpuTemp}°C or hotter for ~10 seconds, even with this page closed. Most GPUs run fine up to the low 80s. Applies to trainings you start from now on.`
+              : "Off: training won't stop on its own if the GPU gets hot."
+          }
+        >
+          <div className={styles["inline"]}>
+            <input
+              type="checkbox"
+              checked={store.maxGpuTemp > 0}
+              onChange={(e) =>
+                store.setMaxGpuTemp(
+                  e.currentTarget.checked ? DEFAULT_MAX_GPU_TEMP : 0,
+                )
+              }
+            />
+            {store.maxGpuTemp > 0 && (
+              <>
+                <input
+                  type="number"
+                  min={60}
+                  max={95}
+                  value={store.maxGpuTemp}
+                  onChange={(e) =>
+                    store.setMaxGpuTemp(
+                      Math.min(95, Math.max(60, Number(e.currentTarget.value) || 0)),
+                    )
+                  }
+                  style={{ width: 70, minWidth: 0 }}
+                />
+                <span>°C</span>
+              </>
+            )}
+          </div>
+        </ListItem>
+      ) : (
+        <></>
+      )}
       {health && models.length > 0 ? (
         <ListItem
           title="Base model"
@@ -1200,7 +1300,7 @@ export function LoraStudio() {
             <>
               <h3>Your LoRAs</h3>
               {store.jobs.map((job) => (
-                <JobCard key={job.id} job={job} />
+                <JobCard key={job.id} job={job} gpu={health?.gpu} />
               ))}
             </>
           )}

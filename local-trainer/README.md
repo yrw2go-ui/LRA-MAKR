@@ -40,6 +40,18 @@ Once it shows as downloaded, training uses only the local copy.
 Jobs, datasets, configs, logs and `.safetensors` outputs are stored in
 `~/.lora-studio/jobs/<id>/` (change with `--home`).
 
+## Stopping and overheating
+
+- **Stop training** in the app stops ai-toolkit and every process it started,
+  and force-kills anything still running 10 seconds later, so the GPU is
+  freed right away.
+- **Overheat protection** (on by default at 85°C, adjustable in the app): the
+  trainer checks the GPU temperature every 5 seconds with `nvidia-smi` and
+  stops the run if it stays at or above the limit for ~10 seconds. This runs
+  in the trainer itself, so it works with the browser closed.
+- After a stop, the last checkpoint ai-toolkit saved (every quarter of the
+  run) is still downloadable as a partial LoRA.
+
 ## Using it from a hosted copy of the app
 
 Only pages served from `localhost` or the desktop app may talk to the trainer,

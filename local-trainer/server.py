@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -30,6 +31,11 @@ VERSION = "1.0"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv"}
 MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024
+GPU_POLL_SECONDS = 5
+# consecutive readings over the limit before stopping (~10s), so a single
+# spike doesn't kill a run
+OVERHEAT_READINGS = 2
+DEFAULT_MAX_TEMP = 85
 
 # Base models LRA-MAKR can train locally. "model" and "sample" are merged
 # into the ai-toolkit config; they follow ai-toolkit's config/examples.
@@ -167,6 +173,14 @@ def to_yaml(value, indent=0):
     return json.dumps(str(value))
 
 
+def parse_max_temp(value):
+    try:
+        temp = int(value)
+    except (TypeError, ValueError):
+        return None
+    return temp if 50 <= temp <= 100 else None
+
+
 def slugify(text):
     slug = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
     return slug[:40] or "lora"
@@ -205,6 +219,68 @@ def gpu_info():
         return []
 
 
+def gpu_stats():
+    """Live readings for the GPU training runs on (cuda:0), or None."""
+    try:
+        out = subprocess.run(
+            [
+                "nvidia-smi",
+                "--id=0",
+                "--query-gpu=temperature.gpu,utilization.gpu,power.draw,memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+        temp, util, power, used, total = [p.strip() for p in out.splitlines()[0].split(",")]
+        num = lambda v: float(v) if v.replace(".", "", 1).isdigit() else None
+        return {
+            "temp_c": num(temp),
+            "util_pct": num(util),
+            "power_w": num(power),
+            "mem_used_gb": round(num(used) / 1024, 1) if num(used) is not None else None,
+            "mem_total_gb": round(num(total) / 1024, 1) if num(total) is not None else None,
+            "at": time.time(),
+        }
+    except Exception:
+        return None
+
+
+def start_process_group():
+    """Popen kwargs that put the trainer in its own process group, so
+    stopping it also stops any worker processes it started."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def kill_tree(proc, grace=10):
+    """Asks the trainer and its children to stop, then force-kills whatever
+    is still running after `grace` seconds."""
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+
+    def force():
+        try:
+            proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # stragglers in the group too
+        except ProcessLookupError:
+            pass
+
+    threading.Thread(target=force, daemon=True).start()
+
+
 # ---------------------------------------------------------------- state
 
 
@@ -222,6 +298,8 @@ class Store:
         self.downloads = {}  # model id -> {"status", "log"}
         self.cached = {}  # model id -> bool
         self.gpus = gpu_info()
+        self.gpu = None  # latest gpu_stats() reading
+        self.hot_readings = 0
 
         for meta in self.jobs_dir.glob("*/job.json"):
             try:
@@ -236,6 +314,8 @@ class Store:
 
         threading.Thread(target=self.worker, daemon=True).start()
         threading.Thread(target=self.refresh_cache, daemon=True).start()
+        if self.gpus:
+            threading.Thread(target=self.watch_gpu, daemon=True).start()
 
     # -- jobs
 
@@ -270,6 +350,8 @@ class Store:
             "sample_prompts": [
                 str(p) for p in (settings.get("sample_prompts") or []) if str(p).strip()
             ][:6],
+            # stop automatically if the GPU gets this hot; None disables it
+            "max_temp": parse_max_temp(settings.get("max_temp", DEFAULT_MAX_TEMP)),
             "status": "uploading",
             "step": 0,
             "created_at": time.time(),
@@ -388,19 +470,42 @@ class Store:
         }
         (self.job_dir(job["id"]) / "config.yaml").write_text(to_yaml(config) + "\n")
 
-    def cancel(self, job_id):
+    def cancel(self, job_id, reason=None):
         with self.lock:
             job = self.jobs.get(job_id)
             if not job:
                 return
             if job_id in self.queue:
                 self.queue.remove(job_id)
-                job["status"] = "canceled"
-                self.save(job)
             elif self.current and self.current[0] == job_id:
-                job["status"] = "canceled"
-                self.save(job)
-                self.current[1].terminate()
+                kill_tree(self.current[1])
+            elif job["status"] not in ("uploading",):
+                return
+            job["status"] = "canceled"
+            job["error"] = reason
+            self.save(job)
+
+    def watch_gpu(self):
+        while True:
+            self.gpu = gpu_stats()
+            temp = (self.gpu or {}).get("temp_c")
+            current = self.current
+            job = self.jobs.get(current[0]) if current else None
+            limit = job.get("max_temp") if job else None
+            if job and limit and temp is not None and temp >= limit:
+                self.hot_readings += 1
+                if self.hot_readings >= OVERHEAT_READINGS:
+                    self.hot_readings = 0
+                    print(f"GPU at {temp:.0f}°C (limit {limit}°C): stopping {job['name']}")
+                    self.cancel(
+                        job["id"],
+                        f"Stopped automatically: GPU reached {temp:.0f}°C "
+                        f"(your limit is {limit}°C). Let it cool down, improve "
+                        "airflow, or raise the limit in LRA-MAKR.",
+                    )
+            else:
+                self.hot_readings = 0
+            time.sleep(GPU_POLL_SECONDS)
 
     def delete(self, job_id):
         self.cancel(job_id)
@@ -438,6 +543,7 @@ class Store:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 env=env,
+                **start_process_group(),
             )
         except Exception as e:
             job.update(status="failed", error=f"Could not start ai-toolkit: {e}")
@@ -446,6 +552,7 @@ class Store:
 
         with self.lock:
             self.current = (job_id, proc)
+            self.hot_readings = 0
             job.update(status="processing", started_at=time.time())
             self.save(job)
 
@@ -521,6 +628,10 @@ class Store:
         out = {k: v for k, v in job.items() if k != "slug"}
         weights = self.weights_file(job)
         out["weights"] = f"jobs/{job['id']}/files/{weights.name}" if weights else None
+        # a stopped or failed run may still have a checkpoint worth keeping
+        if weights and job["status"] != "succeeded":
+            m = re.search(r"_(\d+)\.safetensors$", weights.name)
+            out["partial_step"] = int(m.group(1)) if m else None
         samples_dir = self.output_dir(job) / "samples"
         samples = sorted(
             (p for p in samples_dir.glob("*") if p.suffix.lower() in IMAGE_EXTS | VIDEO_EXTS),
@@ -675,6 +786,7 @@ def make_handler(store: Store, allowed_origins):
                     "toolkit": str(store.toolkit),
                     "toolkit_found": (store.toolkit / "run.py").exists(),
                     "gpus": store.gpus,
+                    "gpu": store.gpu,
                 })
             if method == "GET" and parts == ["models"]:
                 return self.reply(200, {"models": store.models()})

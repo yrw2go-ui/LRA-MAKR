@@ -48,7 +48,19 @@ export type LocalHealth = {
   toolkit: string;
   toolkit_found: boolean;
   gpus: { name: string; vram_gb: number }[];
+  gpu: GpuStats | null;
 };
+
+// live readings from the local trainer's nvidia-smi
+export type GpuStats = {
+  temp_c: number | null;
+  util_pct: number | null;
+  power_w: number | null;
+  mem_used_gb: number | null;
+  mem_total_gb: number | null;
+};
+
+export const DEFAULT_MAX_GPU_TEMP = 85;
 
 export type LoraSample = {
   id: string;
@@ -84,6 +96,8 @@ export type LoraJob = {
   step?: number;
   queuePosition?: number;
   localSamples?: string[];
+  // step of the checkpoint left behind by a stopped or failed local run
+  partialStep?: number;
   // local training samples have been copied into the library
   librarySaved?: boolean;
 };
@@ -136,6 +150,8 @@ const DEFAULT_LORA_STATE = {
   accessCode: "",
   backend: "replicate" as LoraBackend,
   localUrl: DEFAULT_LOCAL_URL,
+  // local trainer stops a run if the GPU stays at or above this; 0 = off
+  maxGpuTemp: DEFAULT_MAX_GPU_TEMP,
   // bumped whenever library contents change, so views can reload
   libraryVersion: 0,
   jobs: [] as LoraJob[],
@@ -238,6 +254,7 @@ export const useLoraStore = createPersistStore(
         logs: j.log_tail,
         queuePosition: j.queue_position ?? undefined,
         weights: j.weights ?? undefined,
+        partialStep: j.partial_step ?? undefined,
         localSamples: j.samples ?? [],
       };
     }
@@ -351,6 +368,10 @@ export const useLoraStore = createPersistStore(
         set({ backend });
       },
 
+      setMaxGpuTemp(temp: number) {
+        set({ maxGpuTemp: temp });
+      },
+
       setLocalUrl(url: string) {
         set({ localUrl: url.trim() || DEFAULT_LOCAL_URL });
       },
@@ -416,6 +437,7 @@ export const useLoraStore = createPersistStore(
               rank: opts.rank,
               lr: opts.lr,
               sample_prompts: opts.samplePrompts,
+              max_temp: _get().maxGpuTemp || null,
             }),
           });
           patchJob(job.id, { localId: created.id });
