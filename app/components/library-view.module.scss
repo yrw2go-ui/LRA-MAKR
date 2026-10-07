@@ -1,0 +1,185 @@
+.library {
+  animation: slide-in ease 0.3s;
+}
+
+.usage {
+  font-size: 12px;
+  opacity: 0.7;
+  margin-bottom: 12px;
+}
+
+.empty {
+  padding: 40px 20px;
+  text-align: center;
+  opacity: 0.8;
+
+  p {
+    font-size: 14px;
+  }
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 0 12px;
+  border: var(--border-in-light);
+  border-radius: 10px;
+  background: var(--white);
+  color: var(--black);
+  font: inherit;
+  text-align: left;
+  overflow: hidden;
+  cursor: pointer;
+  transition: box-shadow 0.2s ease;
+
+  &:hover {
+    box-shadow: var(--card-shadow);
+    border-color: var(--primary);
+  }
+}
+
+.card-cover {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  background: var(--gray);
+  margin-bottom: 6px;
+}
+
+.card-title {
+  font-weight: bold;
+  padding: 0 12px;
+}
+
+.card-meta {
+  font-size: 12px;
+  opacity: 0.7;
+  padding: 0 12px;
+}
+
+.detail-header {
+  margin-bottom: 12px;
+
+  h3 {
+    margin: 8px 0 2px;
+  }
+
+  .card-meta {
+    padding: 0;
+  }
+}
+
+.back {
+  font-size: 13px;
+  color: var(--primary);
+  cursor: pointer;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: var(--border-in-light);
+  margin-bottom: 12px;
+
+  button {
+    padding: 8px 14px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    background: none;
+    color: var(--black);
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    opacity: 0.7;
+
+    &.active {
+      border-bottom-color: var(--primary);
+      opacity: 1;
+      font-weight: bold;
+    }
+  }
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.tile {
+  position: relative;
+
+  img,
+  video {
+    display: block;
+    width: 100%;
+    aspect-ratio: 1;
+    object-fit: cover;
+    border-radius: 8px;
+    background: var(--gray);
+  }
+
+  &:hover .tile-delete {
+    opacity: 1;
+  }
+}
+
+.tile-delete {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: white;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+
+  @media (hover: none) {
+    opacity: 1;
+  }
+}
+
+.tile-text {
+  font-size: 11px;
+  opacity: 0.75;
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

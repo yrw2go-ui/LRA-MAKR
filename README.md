@@ -9,6 +9,9 @@ offline once the base model is downloaded.
 - **LoRA types:** person / character, object / product, art style, concept
 - **Outputs:** a single `.safetensors` file with the trigger word stored in its
   metadata, plus a one-click ComfyUI export (workflow + LoRA + setup notes)
+- **Library:** every LoRA's training images (with captions) and generated
+  images are kept in the browser, with "Download all" and "Retrain with these
+  images". It's per-browser storage, so it doesn't sync between devices.
 
 ## Run the web app
 
@@ -52,6 +55,8 @@ app/store/lora.ts               training jobs: Replicate + local trainer clients
 app/lib/lora-trainers.ts        base models, LoRA types, trainer-schema mapping
 app/lib/comfy.ts                ComfyUI workflow templates
 app/lib/safetensors.ts          unpack trainer outputs, stamp metadata
+app/lib/library.ts              image library (IndexedDB)
+app/components/library-view.tsx Library tab
 app/api/replicate/              allowlisted Replicate proxy
 local-trainer/                  local ai-toolkit trainer (Python, stdlib only)
 ```

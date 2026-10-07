@@ -40,6 +40,8 @@ import {
   comfyTemplateFor,
 } from "@/app/lib/comfy";
 import { nanoid } from "nanoid";
+import { LibraryView } from "@/app/components/library-view";
+import { LibraryImage } from "@/app/lib/library";
 
 const MIN_IMAGES = 5;
 const MAX_IMAGES = 40;
@@ -278,7 +280,16 @@ function JobCard(props: { job: LoraJob }) {
             <IconButton
               icon={<DeleteIcon />}
               bordered
-              onClick={() => store.removeJob(job.id)}
+              title="Delete LoRA"
+              onClick={() => {
+                if (
+                  confirm(
+                    `Delete "${job.name}" and its saved images from this browser?`,
+                  )
+                ) {
+                  store.removeJob(job.id);
+                }
+              }}
             />
           )}
         </div>
@@ -535,6 +546,7 @@ export function LoraStudio() {
   const [autocaption, setAutocaption] = useState(true);
   const [consent, setConsent] = useState(false);
   const [items, setItems] = useState<DatasetItem[]>([]);
+  const [tab, setTab] = useState<"studio" | "library">("studio");
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState(false);
 
@@ -724,6 +736,7 @@ export function LoraStudio() {
             .filter(Boolean),
           dataset,
           imageCount: items.length,
+          trainingFiles: trainingFiles(),
         });
         resetForm();
       } finally {
@@ -751,11 +764,50 @@ export function LoraStudio() {
         ),
         dataset,
         imageCount: items.length,
+        trainingFiles: trainingFiles(),
       });
       resetForm();
     } finally {
       setBusy(false);
     }
+  }
+
+  function trainingFiles() {
+    return items.map((i) => ({
+      // images were re-encoded as JPEG when added
+      name: i.kind === "image" ? i.name.replace(/\.\w+$/, "") + ".jpg" : i.name,
+      type: i.kind === "video" ? `video/${i.ext}` : "image/jpeg",
+      data: i.data,
+      caption: i.caption.trim(),
+    }));
+  }
+
+  // loads a LoRA's saved training images back into the form
+  async function reuseDataset(job: LoraJob, training: LibraryImage[]) {
+    const loaded: DatasetItem[] = await Promise.all(
+      training.map(async (img) => ({
+        id: nanoid(),
+        name: img.name,
+        ext:
+          img.name.match(/\.(\w{2,5})$/)?.[1]?.toLowerCase() ??
+          (img.type.startsWith("video/") ? "mp4" : "jpg"),
+        kind: img.type.startsWith("video/") ? "video" : "image",
+        preview: URL.createObjectURL(img.blob),
+        data: new Uint8Array(await img.blob.arrayBuffer()),
+        caption: img.caption ?? "",
+      })),
+    );
+    items.forEach((i) => URL.revokeObjectURL(i.preview));
+    setItems(loaded.slice(0, MAX_IMAGES));
+    setName(`${job.name} v2`);
+    setTriggerWord(job.triggerWord);
+    const type = LORA_TYPES.find((t) => t.name === job.loraType);
+    if (type) setLoraTypeId(type.id);
+    setTab("studio");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    showToast(
+      `Loaded ${loaded.length} images from "${job.name}". Pick settings and train.`,
+    );
   }
 
   function resetForm() {
@@ -773,9 +825,32 @@ export function LoraStudio() {
           <div className={styles["tagline"]}>
             Train image and video LoRAs from your files in a few clicks
           </div>
+          <nav className={styles["nav"]}>
+            <button
+              className={tab === "studio" ? styles["active"] : ""}
+              onClick={() => setTab("studio")}
+            >
+              Studio
+            </button>
+            <button
+              className={tab === "library" ? styles["active"] : ""}
+              onClick={() => setTab("library")}
+            >
+              Library
+            </button>
+          </nav>
         </header>
 
-        <div className={styles["lora-body"]}>
+        {tab === "library" && (
+          <div className={styles["lora-body"]}>
+            <LibraryView onReuse={reuseDataset} />
+          </div>
+        )}
+
+        <div
+          className={styles["lora-body"]}
+          style={tab === "studio" ? undefined : { display: "none" }}
+        >
           <List>
             <ListItem
               title="Train on"

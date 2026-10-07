@@ -1,4 +1,5 @@
 import { createPersistStore } from "@/app/lib/store";
+import { addLibraryImages, deleteJobImages } from "@/app/lib/library";
 import { nanoid } from "nanoid";
 import {
   extractSafetensors,
@@ -83,6 +84,8 @@ export type LoraJob = {
   step?: number;
   queuePosition?: number;
   localSamples?: string[];
+  // local training samples have been copied into the library
+  librarySaved?: boolean;
 };
 
 // the file name used for downloads and in ComfyUI workflows
@@ -101,6 +104,14 @@ const ARCHITECTURES: Record<string, string> = {
   "flux-fast": "flux-1-dev/lora",
   "flux-schnell": "flux-1-schnell/lora",
   sdxl: "stable-diffusion-xl-v1-base/lora",
+};
+
+// a dataset file handed over when training starts, kept in the library
+export type TrainingFile = {
+  name: string;
+  type: string;
+  data: Uint8Array;
+  caption: string;
 };
 
 export function isLoraDone(status: LoraStatus) {
@@ -125,6 +136,8 @@ const DEFAULT_LORA_STATE = {
   accessCode: "",
   backend: "replicate" as LoraBackend,
   localUrl: DEFAULT_LOCAL_URL,
+  // bumped whenever library contents change, so views can reload
+  libraryVersion: 0,
   jobs: [] as LoraJob[],
 };
 
@@ -229,6 +242,75 @@ export const useLoraStore = createPersistStore(
       };
     }
 
+    // Replicate's file host may not allow cross-origin downloads, so fall
+    // back to the server's allowlisted download route
+    async function fetchRemote(url: string) {
+      try {
+        return await fetch(url);
+      } catch {
+        return fetch(`${REPLICATE_API}/download?url=${encodeURIComponent(url)}`, {
+          headers: headers(false),
+        });
+      }
+    }
+
+    function bumpLibrary() {
+      set({ libraryVersion: _get().libraryVersion + 1 });
+    }
+
+    async function saveTrainingFiles(jobId: string, files: TrainingFile[]) {
+      const now = Date.now();
+      try {
+        await addLibraryImages(
+          files.map((f, i) => ({
+            id: `${jobId}-train-${i}`,
+            jobId,
+            kind: "training",
+            name: f.name,
+            type: f.type,
+            blob: new Blob([f.data], { type: f.type }),
+            caption: f.caption || undefined,
+            createdAt: now + i,
+          })),
+        );
+        bumpLibrary();
+      } catch (e) {
+        console.error("[LoRA] couldn't save training images to library", e);
+      }
+    }
+
+    async function saveOutputs(
+      jobId: string,
+      urls: string[],
+      prompt: string,
+    ) {
+      const images = [];
+      for (const url of urls) {
+        try {
+          const res = await fetchRemote(url);
+          if (!res.ok) continue;
+          const blob = await res.blob();
+          images.push({
+            id: nanoid(),
+            jobId,
+            kind: "output" as const,
+            name: url.split("/").pop()?.split("?")[0] || "output",
+            type: blob.type || "image/png",
+            blob,
+            prompt,
+            createdAt: Date.now(),
+          });
+        } catch (e) {
+          console.error("[LoRA] couldn't save output to library", e);
+        }
+      }
+      if (images.length) {
+        await addLibraryImages(images);
+        bumpLibrary();
+      }
+      return images.length;
+    }
+
     const methods = {
       // Fetches a finished LoRA, unpacks it if the trainer returned an
       // archive, and stamps name / trigger word / base model into it.
@@ -236,20 +318,10 @@ export const useLoraStore = createPersistStore(
         const job = _get().jobs.find((j) => j.id === jobId);
         if (!job?.weights) throw new Error("This LoRA has no weights yet");
 
-        let res: Response;
-        if (job.backend === "local") {
-          res = await fetch(methods.localFileUrl(job.weights));
-        } else {
-          try {
-            res = await fetch(job.weights);
-          } catch {
-            // the file host may not allow cross-origin downloads
-            res = await fetch(
-              `${REPLICATE_API}/download?url=${encodeURIComponent(job.weights)}`,
-              { headers: headers(false) },
-            );
-          }
-        }
+        const res =
+          job.backend === "local"
+            ? await fetch(methods.localFileUrl(job.weights))
+            : await fetchRemote(job.weights);
         if (!res.ok) {
           throw new Error(
             res.status === 404 || res.status === 410
@@ -310,6 +382,7 @@ export const useLoraStore = createPersistStore(
         samplePrompts: string[];
         dataset: Blob;
         imageCount: number;
+        trainingFiles: TrainingFile[];
       }) {
         const job: LoraJob = {
           id: nanoid(),
@@ -327,6 +400,7 @@ export const useLoraStore = createPersistStore(
           samples: [],
         };
         set({ jobs: [job, ..._get().jobs] });
+        saveTrainingFiles(job.id, opts.trainingFiles);
 
         try {
           const created = await local("jobs", {
@@ -364,9 +438,15 @@ export const useLoraStore = createPersistStore(
         set({ accessCode: code.trim() });
       },
 
-      removeJob(id: string) {
+      async removeJob(id: string) {
         set({ jobs: _get().jobs.filter((j) => j.id !== id) });
+        await deleteJobImages(id).catch((e) =>
+          console.error("[LoRA] couldn't delete library images", e),
+        );
+        bumpLibrary();
       },
+
+      bumpLibrary,
 
       async fetchTrainerSchema(trainer: string): Promise<TrainerSchema> {
         const model = await api(`v1/models/${trainer}`);
@@ -389,6 +469,7 @@ export const useLoraStore = createPersistStore(
         overrides: Record<string, any>;
         dataset: Blob;
         imageCount: number;
+        trainingFiles: TrainingFile[];
       }) {
         const job: LoraJob = {
           id: nanoid(),
@@ -405,6 +486,7 @@ export const useLoraStore = createPersistStore(
           samples: [],
         };
         set({ jobs: [job, ..._get().jobs] });
+        saveTrainingFiles(job.id, opts.trainingFiles);
 
         try {
           const form = new FormData();
@@ -441,7 +523,16 @@ export const useLoraStore = createPersistStore(
         const job = _get().jobs.find((j) => j.id === id);
         if (job?.localId) {
           try {
-            patchJob(id, fromLocal(await local(`jobs/${job.localId}`)));
+            const update = fromLocal(await local(`jobs/${job.localId}`));
+            patchJob(id, update);
+            // keep the training samples once the job is done, since the
+            // trainer's job folder may be cleaned up later
+            if (update.status === "succeeded" && !job.librarySaved) {
+              patchJob(id, { librarySaved: true });
+              const urls = (update.localSamples ?? []).map(methods.localFileUrl);
+              const saved = await saveOutputs(id, urls, "training sample");
+              if (urls.length && !saved) patchJob(id, { librarySaved: false });
+            }
           } catch (e: any) {
             console.error("[LoRA] local refresh failed", e);
           }
@@ -520,13 +611,16 @@ export const useLoraStore = createPersistStore(
             await new Promise((r) => setTimeout(r, 3000));
             p = await api(`v1/predictions/${p.id}`);
           }
+          const images: string[] = (
+            Array.isArray(p.output) ? p.output : [p.output]
+          ).filter(Boolean);
           patchSample(jobId, sample.id, {
             status: p.status,
-            images: (Array.isArray(p.output) ? p.output : [p.output]).filter(
-              Boolean,
-            ),
+            images,
             error: p.error ?? undefined,
           });
+          // Replicate deletes outputs after about an hour; keep a copy
+          if (p.status === "succeeded") await saveOutputs(jobId, images, prompt);
         } catch (e: any) {
           patchSample(jobId, sample.id, { status: "failed", error: e.message });
         }
